@@ -51,6 +51,9 @@ public class SendUDPDat : MonoBehaviour
         SendTimeToServer();
     }
 
+    /**
+     * Format for handshake is 00<guid><client_listen_port>
+     */
     void SendHandshakeToServer()
     {
         try
@@ -73,6 +76,9 @@ public class SendUDPDat : MonoBehaviour
         }
     }
 
+    /**
+     * Format for handshake is 01<guid><time_passed>
+     */
     void SendTimeToServer()
     {
         try
