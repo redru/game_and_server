@@ -1,3 +1,6 @@
+mod commands;
+
+use crate::commands::{get_port, get_time, get_uuid, parse_command, Command};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -41,7 +44,7 @@ async fn main() -> io::Result<()> {
 
                 // Handle the datagram in another thread
                 tokio::spawn(async move {
-                    handle_datagram_received(s, amt, address, buf, clients).await;
+                    handle_datagram_received(Context::from((address, buf, amt)), s, clients).await;
                 });
             }
         }
@@ -68,51 +71,72 @@ fn listen_shutdown(shutdown_send: UnboundedSender<()>) {
     });
 }
 
+struct Context {
+    address: SocketAddr,
+    data: Vec<u8>, // Allocate once and always extract references from it
+}
+
+impl From<(SocketAddr, [u8; 1024], usize)> for Context {
+    fn from(value: (SocketAddr, [u8; 1024], usize)) -> Self {
+        Self {
+            address: value.0,
+            data: Vec::from(&value.1[..value.2]),
+        }
+    }
+}
+
 struct Client {
     address: SocketAddr,
 }
 
 async fn handle_datagram_received(
+    context: Context,
     socket: Arc<UdpSocket>,
-    amt: usize,
-    address: SocketAddr,
-    buf: [u8; 1024],
     clients: Arc<Mutex<HashMap<String, Client>>>,
 ) {
     println!(
         "received datagram from {:}: {:}",
-        address,
-        String::from_utf8_lossy(&buf[..])
+        context.address,
+        String::from_utf8_lossy(&context.data)
     );
 
-    let command = String::from_utf8_lossy(&buf[0..2]);
+    let command = parse_command(&context.data);
 
-    match command.as_ref() {
-        "00" => {
-            let uuid = String::from_utf8_lossy(&buf[2..38]).to_string();
-            let port = String::from_utf8_lossy(&buf[38..43]).to_string();
-
-            let client = Client {
-                address: SocketAddr::new(address.ip(), port.parse().unwrap()),
-            };
-
-            clients.lock().await.insert(uuid, client);
+    if let Some(command) = command {
+        match command {
+            Command::Handshake => handle_handshake(&context, &clients).await,
+            Command::TotalTime => handle_total_time(&context, &socket, &clients).await,
         }
-        "01" => {
-            let uuid = std::str::from_utf8(&buf[2..38]).unwrap();
-            let data = &buf[38..amt];
-
-            let clients = clients.lock().await;
-            let client_address = clients.get(uuid).unwrap().address;
-
-            socket
-                .send_to(data, client_address)
-                .await
-                .expect("send failed");
-        }
-        _ => {
-            println!("unknown command {:}", command);
-            return;
-        }
+    } else {
+        println!("unknown command {:?}", command);
+        return;
     }
+}
+
+async fn handle_handshake(context: &Context, clients: &Arc<Mutex<HashMap<String, Client>>>) {
+    let uuid = get_uuid(&context.data);
+    let port = get_port(&context.data);
+
+    let client = Client {
+        address: SocketAddr::new(context.address.ip(), port),
+    };
+
+    clients.lock().await.insert(uuid.to_string(), client);
+}
+
+async fn handle_total_time(
+    context: &Context,
+    socket: &Arc<UdpSocket>,
+    clients: &Arc<Mutex<HashMap<String, Client>>>,
+) {
+    let uuid = get_uuid(&context.data);
+    let time = get_time(&context.data);
+
+    let clients = clients.lock().await;
+    let client_address = clients.get(uuid).unwrap().address;
+
+    socket
+        .send_to(time, client_address)
+        .await
+        .expect("send failed");
 }
